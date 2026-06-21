@@ -1,0 +1,8 @@
+(* MLton basis file for the sml-glm library.
+ * Consumers can include this file to bring `structure Glm` into scope. *)
+local
+  $(SML_LIB)/basis/basis.mlb
+in
+  glm.sig
+  glm.sml
+end

@@ -1,0 +1,4 @@
+package github.com/sjqtentacles/sml-collision
+require {
+  github.com/sjqtentacles/sml-glm
+}

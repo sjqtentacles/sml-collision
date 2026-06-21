@@ -1,0 +1,9 @@
+(* MLB for the sml-collision library: vendored sml-glm core plus the collision
+ * sources. The dependency .mlb is brought in WITHOUT a `local` wrapper so that
+ * consumers may `open Glm` alongside Collision. *)
+$(SML_LIB)/basis/basis.mlb
+
+../sml-glm/glm.mlb
+
+collision.sig
+collision.sml
