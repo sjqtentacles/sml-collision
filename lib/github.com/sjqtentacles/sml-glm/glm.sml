@@ -146,21 +146,29 @@ struct
 
     (* element access by (row, col), column-major storage *)
     (* m = (m00,m10,m20, m01,m11,m21, m02,m12,m22) *)
+    (* These matrix routines route their many real intermediates through a
+     * mutable array rather than binding them all as simultaneously-live locals.
+     * That keeps floating-point register pressure low enough to dodge Poly/ML's
+     * native-codegen bugs ("asFPReg"/"getAllocatedGenReg raised while
+     * compiling") on large straight-line real arithmetic. Behaviour is
+     * identical to the obvious tuple version. *)
     fun mul ((a00,a10,a20, a01,a11,a21, a02,a12,a22) : t,
              (b00,b10,b20, b01,b11,b21, b02,b12,b22) : t) : t =
       let
-        (* result row r, col c = sum_k A[r,k] B[k,c] *)
-        val r00 = a00*b00 + a01*b10 + a02*b20
-        val r10 = a10*b00 + a11*b10 + a12*b20
-        val r20 = a20*b00 + a21*b10 + a22*b20
-        val r01 = a00*b01 + a01*b11 + a02*b21
-        val r11 = a10*b01 + a11*b11 + a12*b21
-        val r21 = a20*b01 + a21*b11 + a22*b21
-        val r02 = a00*b02 + a01*b12 + a02*b22
-        val r12 = a10*b02 + a11*b12 + a12*b22
-        val r22 = a20*b02 + a21*b12 + a22*b22
+        val r = Array.array (9, 0.0)
+        (* result row i, col j = sum_k A[i,k] B[k,j]; stored column-major. *)
+        val () = Array.update (r, 0, a00*b00 + a01*b10 + a02*b20)  (* r00 *)
+        val () = Array.update (r, 1, a10*b00 + a11*b10 + a12*b20)  (* r10 *)
+        val () = Array.update (r, 2, a20*b00 + a21*b10 + a22*b20)  (* r20 *)
+        val () = Array.update (r, 3, a00*b01 + a01*b11 + a02*b21)  (* r01 *)
+        val () = Array.update (r, 4, a10*b01 + a11*b11 + a12*b21)  (* r11 *)
+        val () = Array.update (r, 5, a20*b01 + a21*b11 + a22*b21)  (* r21 *)
+        val () = Array.update (r, 6, a00*b02 + a01*b12 + a02*b22)  (* r02 *)
+        val () = Array.update (r, 7, a10*b02 + a11*b12 + a12*b22)  (* r12 *)
+        val () = Array.update (r, 8, a20*b02 + a21*b12 + a22*b22)  (* r22 *)
+        fun g i = Array.sub (r, i)
       in
-        (r00,r10,r20, r01,r11,r21, r02,r12,r22)
+        (g 0, g 1, g 2, g 3, g 4, g 5, g 6, g 7, g 8)
       end
 
     fun transpose ((m00,m10,m20, m01,m11,m21, m02,m12,m22) : t) : t =
@@ -179,22 +187,23 @@ struct
         else
           let
             val inv = 1.0 / d
-            (* cofactor / adjugate, then transpose -> stored column-major *)
-            val c00 =  (m11*m22 - m12*m21)
-            val c01 = ~(m10*m22 - m12*m20)
-            val c02 =  (m10*m21 - m11*m20)
-            val c10 = ~(m01*m22 - m02*m21)
-            val c11 =  (m00*m22 - m02*m20)
-            val c12 = ~(m00*m21 - m01*m20)
-            val c20 =  (m01*m12 - m02*m11)
-            val c21 = ~(m00*m12 - m02*m10)
-            val c22 =  (m00*m11 - m01*m10)
-            (* inverse[r,c] = inv * cofactor[c,r] *)
-            val i00 = inv*c00  val i01 = inv*c10  val i02 = inv*c20
-            val i10 = inv*c01  val i11 = inv*c11  val i12 = inv*c21
-            val i20 = inv*c02  val i21 = inv*c12  val i22 = inv*c22
+            (* cofactors into an array, then inverse[r,c] = inv * cofactor[c,r];
+               result stored column-major. *)
+            val c = Array.array (9, 0.0)
+            val () = Array.update (c, 0,  (m11*m22 - m12*m21))  (* c00 *)
+            val () = Array.update (c, 1, ~(m10*m22 - m12*m20))  (* c01 *)
+            val () = Array.update (c, 2,  (m10*m21 - m11*m20))  (* c02 *)
+            val () = Array.update (c, 3, ~(m01*m22 - m02*m21))  (* c10 *)
+            val () = Array.update (c, 4,  (m00*m22 - m02*m20))  (* c11 *)
+            val () = Array.update (c, 5, ~(m00*m21 - m01*m20))  (* c12 *)
+            val () = Array.update (c, 6,  (m01*m12 - m02*m11))  (* c20 *)
+            val () = Array.update (c, 7, ~(m00*m12 - m02*m10))  (* c21 *)
+            val () = Array.update (c, 8,  (m00*m11 - m01*m10))  (* c22 *)
+            fun co i = inv * Array.sub (c, i)
           in
-            SOME (i00,i10,i20, i01,i11,i21, i02,i12,i22)
+            (* (i00,i10,i20, i01,i11,i21, i02,i12,i22)
+               where i[r,c] = inv*cofactor[c,r] *)
+            SOME (co 0, co 1, co 2, co 3, co 4, co 5, co 6, co 7, co 8)
           end
       end
 
@@ -307,27 +316,34 @@ struct
           let
             val invd = 1.0 / d
             fun ne (r,c) = ~(e (r,c))
-            (* inverse stored column-major: index c*4+r *)
-            val b00 = ( e(1,1)*c5 - e(1,2)*c4 + e(1,3)*c3) * invd
-            val b01 = (ne(0,1)*c5 + e(0,2)*c4 - e(0,3)*c3) * invd
-            val b02 = ( e(3,1)*s5 - e(3,2)*s4 + e(3,3)*s3) * invd
-            val b03 = (ne(2,1)*s5 + e(2,2)*s4 - e(2,3)*s3) * invd
-            val b10 = (ne(1,0)*c5 + e(1,2)*c2 - e(1,3)*c1) * invd
-            val b11 = ( e(0,0)*c5 - e(0,2)*c2 + e(0,3)*c1) * invd
-            val b12 = (ne(3,0)*s5 + e(3,2)*s2 - e(3,3)*s1) * invd
-            val b13 = ( e(2,0)*s5 - e(2,2)*s2 + e(2,3)*s1) * invd
-            val b20 = ( e(1,0)*c4 - e(1,1)*c2 + e(1,3)*c0) * invd
-            val b21 = (ne(0,0)*c4 + e(0,1)*c2 - e(0,3)*c0) * invd
-            val b22 = ( e(3,0)*s4 - e(3,1)*s2 + e(3,3)*s0) * invd
-            val b23 = (ne(2,0)*s4 + e(2,1)*s2 - e(2,3)*s0) * invd
-            val b30 = (ne(1,0)*c3 + e(1,1)*c1 - e(1,2)*c0) * invd
-            val b31 = ( e(0,0)*c3 - e(0,1)*c1 + e(0,2)*c0) * invd
-            val b32 = (ne(3,0)*s3 + e(3,1)*s1 - e(3,2)*s0) * invd
-            val b33 = ( e(2,0)*s3 - e(2,1)*s1 + e(2,2)*s0) * invd
+            (* Compute the 16 entries one at a time straight into a mutable
+               array (row-major here), so they are never all simultaneously
+               live. This keeps Poly/ML's native codegen from exhausting FP
+               registers ("asFPReg raised while compiling"). *)
+            val b = Array.array (16, 0.0)
+            fun set (i, v) = Array.update (b, i, v * invd)
+            val () = set (0,   e(1,1)*c5 - e(1,2)*c4 + e(1,3)*c3)
+            val () = set (1,  ne(0,1)*c5 + e(0,2)*c4 - e(0,3)*c3)
+            val () = set (2,   e(3,1)*s5 - e(3,2)*s4 + e(3,3)*s3)
+            val () = set (3,  ne(2,1)*s5 + e(2,2)*s4 - e(2,3)*s3)
+            val () = set (4,  ne(1,0)*c5 + e(1,2)*c2 - e(1,3)*c1)
+            val () = set (5,   e(0,0)*c5 - e(0,2)*c2 + e(0,3)*c1)
+            val () = set (6,  ne(3,0)*s5 + e(3,2)*s2 - e(3,3)*s1)
+            val () = set (7,   e(2,0)*s5 - e(2,2)*s2 + e(2,3)*s1)
+            val () = set (8,   e(1,0)*c4 - e(1,1)*c2 + e(1,3)*c0)
+            val () = set (9,  ne(0,0)*c4 + e(0,1)*c2 - e(0,3)*c0)
+            val () = set (10,  e(3,0)*s4 - e(3,1)*s2 + e(3,3)*s0)
+            val () = set (11, ne(2,0)*s4 + e(2,1)*s2 - e(2,3)*s0)
+            val () = set (12, ne(1,0)*c3 + e(1,1)*c1 - e(1,2)*c0)
+            val () = set (13,  e(0,0)*c3 - e(0,1)*c1 + e(0,2)*c0)
+            val () = set (14, ne(3,0)*s3 + e(3,1)*s1 - e(3,2)*s0)
+            val () = set (15,  e(2,0)*s3 - e(2,1)*s1 + e(2,2)*s0)
+            fun g (r, c) = Array.sub (b, r*4 + c)
           in
-            (* fromRows because b** are addressed [row,col] *)
-            SOME (fromRows ((b00,b01,b02,b03),(b10,b11,b12,b13),
-                            (b20,b21,b22,b23),(b30,b31,b32,b33)))
+            SOME (fromRows ((g(0,0),g(0,1),g(0,2),g(0,3)),
+                            (g(1,0),g(1,1),g(1,2),g(1,3)),
+                            (g(2,0),g(2,1),g(2,2),g(2,3)),
+                            (g(3,0),g(3,1),g(3,2),g(3,3))))
           end
       end
 
@@ -388,12 +404,25 @@ struct
         val (sx,sy,sz) = s
         val (ux,uy,uz) = u
         val (fx,fy,fz) = f
+        (* Build the 16 entries one at a time through a mutable array so they
+           are never all simultaneously live; this avoids Poly/ML's native
+           codegen FP-register exhaustion ("asFPReg raised while compiling"). *)
+        val b = Array.array (16, 0.0)
+        fun set (i, v) = Array.update (b, i, v)
+        val () = set (0, sx)  val () = set (1, sy)  val () = set (2, sz)
+        val () = set (3, ~(Vec3.dot (s, eye)))
+        val () = set (4, ux)  val () = set (5, uy)  val () = set (6, uz)
+        val () = set (7, ~(Vec3.dot (u, eye)))
+        val () = set (8, ~fx) val () = set (9, ~fy) val () = set (10, ~fz)
+        val () = set (11, Vec3.dot (f, eye))
+        val () = set (12, 0.0) val () = set (13, 0.0)
+        val () = set (14, 0.0) val () = set (15, 1.0)
+        fun g (r, c) = Array.sub (b, r*4 + c)
       in
-        fromRows
-          (( sx,  sy,  sz,  ~(Vec3.dot (s, eye))),
-           ( ux,  uy,  uz,  ~(Vec3.dot (u, eye))),
-           (~fx, ~fy, ~fz,    Vec3.dot (f, eye)),
-           ( 0.0, 0.0, 0.0, 1.0))
+        fromRows ((g(0,0),g(0,1),g(0,2),g(0,3)),
+                  (g(1,0),g(1,1),g(1,2),g(1,3)),
+                  (g(2,0),g(2,1),g(2,2),g(2,3)),
+                  (g(3,0),g(3,1),g(3,2),g(3,3)))
       end
 
     fun equal (a, b) =
@@ -448,40 +477,77 @@ struct
         (rx, ry, rz)
       end
 
-    fun slerp (q1, q2, t) =
+    fun sub (a, b) = add (a, scale (~1.0, b))
+
+    (* Factored out so the trig/coefficient computation compiles as its own
+       code unit; folding it inline pushes Poly/ML's native codegen over its
+       FP-register budget ("asFPReg raised while compiling"). *)
+    fun slerpCoeffs (d, t) =
       let
-        val d = dot (q1, q2)
-        (* take shorter arc *)
-        val (q2, d) = if d < 0.0 then (scale (~1.0, q2), ~d) else (q2, d)
+        val theta0 = Math.acos (clamp (d, ~1.0, 1.0))
+        val theta = theta0 * t
+        val sinTheta0 = Math.sin theta0
+        val s2 = Math.sin theta / sinTheta0
+        val s1 = Math.cos theta - d * s2
       in
-        if d > 0.9995 then
-          (* nearly parallel: linear interpolate + normalize *)
-          normalize (add (q1, scale (t, sub (q2, q1))))
-        else
-          let
-            val theta0 = Math.acos (clamp (d, ~1.0, 1.0))
-            val theta = theta0 * t
-            val sinTheta0 = Math.sin theta0
-            val s2 = Math.sin theta / sinTheta0
-            val s1 = Math.cos theta - d * s2
-          in
-            add (scale (s1, q1), scale (s2, q2))
-          end
+        (s1, s2)
       end
-    and sub (a, b) = add (a, scale (~1.0, b))
+
+    fun slerp (q1 as (w1,x1,y1,z1), q2, t) =
+      let
+        val d0 = dot (q1, q2)
+        (* take shorter arc *)
+        val (q2 as (w2,x2,y2,z2), d) =
+          if d0 < 0.0 then (scale (~1.0, q2), ~d0) else (q2, d0)
+        (* Compute the two blend coefficients, then build the result a
+           component at a time through a mutable array. Keeping the four
+           result reals from being simultaneously live as inlined tuple
+           arithmetic is what avoids Poly/ML's native-codegen FP-register
+           exhaustion ("asFPReg raised while compiling"). *)
+        val (c1, c2) =
+          if d > 0.9995 then (1.0 - t, t)  (* nearly parallel: linear *)
+          else slerpCoeffs (d, t)
+        val r = Array.array (4, 0.0)
+        val () = Array.update (r, 0, c1*w1 + c2*w2)
+        val () = Array.update (r, 1, c1*x1 + c2*x2)
+        val () = Array.update (r, 2, c1*y1 + c2*y2)
+        val () = Array.update (r, 3, c1*z1 + c2*z2)
+        val res = (Array.sub (r,0), Array.sub (r,1),
+                   Array.sub (r,2), Array.sub (r,3))
+      in
+        (* The linear branch must be renormalised; the slerp branch is already
+           unit-length up to rounding but normalising is harmless. *)
+        if d > 0.9995 then normalize res else res
+      end
 
     fun toMat4 q =
       let
         val (qw,qx,qy,qz) = normalize q
+        (* Build the rotation matrix one entry at a time through a mutable
+           array so the many products are never all simultaneously live; this
+           avoids Poly/ML's native-codegen register exhaustion
+           ("asFPReg"/"getAllocatedGenReg raised while compiling"). *)
         val xx = qx*qx val yy = qy*qy val zz = qz*qz
         val xy = qx*qy val xz = qx*qz val yz = qy*qz
         val wx = qw*qx val wy = qw*qy val wz = qw*qz
+        val b = Array.array (16, 0.0)
+        fun set (i, v) = Array.update (b, i, v)
+        val () = set (0, 1.0 - 2.0*(yy+zz))
+        val () = set (1, 2.0*(xy - wz))
+        val () = set (2, 2.0*(xz + wy))
+        val () = set (4, 2.0*(xy + wz))
+        val () = set (5, 1.0 - 2.0*(xx+zz))
+        val () = set (6, 2.0*(yz - wx))
+        val () = set (8, 2.0*(xz - wy))
+        val () = set (9, 2.0*(yz + wx))
+        val () = set (10, 1.0 - 2.0*(xx+yy))
+        val () = set (15, 1.0)
+        fun g (r, c) = Array.sub (b, r*4 + c)
       in
-        Mat4.fromRows
-          (( 1.0 - 2.0*(yy+zz), 2.0*(xy - wz),     2.0*(xz + wy),     0.0),
-           ( 2.0*(xy + wz),     1.0 - 2.0*(xx+zz), 2.0*(yz - wx),     0.0),
-           ( 2.0*(xz - wy),     2.0*(yz + wx),     1.0 - 2.0*(xx+yy), 0.0),
-           ( 0.0,               0.0,               0.0,               1.0))
+        Mat4.fromRows ((g(0,0),g(0,1),g(0,2),g(0,3)),
+                       (g(1,0),g(1,1),g(1,2),g(1,3)),
+                       (g(2,0),g(2,1),g(2,2),g(2,3)),
+                       (g(3,0),g(3,1),g(3,2),g(3,3)))
       end
 
     fun fromMat3 m =

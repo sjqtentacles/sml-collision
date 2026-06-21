@@ -22,18 +22,4 @@ jobs:
       - name: Install Poly/ML
         run: sudo apt-get update && sudo apt-get install -y polyml libpolyml-dev
       - name: Run tests
-        # Poly/ML 5.7.1 (Ubuntu) has an intermittent code-generator bug
-        # ("InternalError: asGenReg raised while compiling"). It is not a fault
-        # in this library, so retry the compile/test a few times to absorb it.
-        run: |
-          for attempt in 1 2 3 4 5; do
-            echo "::group::Poly/ML attempt $attempt"
-            if make clean >/dev/null 2>&1; make test-poly; then
-              echo "::endgroup::"
-              exit 0
-            fi
-            echo "::endgroup::"
-            echo "Attempt $attempt failed; retrying..."
-          done
-          echo "Poly/ML test failed after 5 attempts"
-          exit 1
+        run: make test-poly
