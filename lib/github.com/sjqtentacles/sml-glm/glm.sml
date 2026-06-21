@@ -371,16 +371,25 @@ struct
     fun rotateY a = rotate (a, (0.0,1.0,0.0))
     fun rotateZ a = rotate (a, (0.0,0.0,1.0))
 
+    (* Build a Mat4 from a function giving each column-major element by index.
+       Routing every builder through this single, separately-compiled function
+       (rather than inlining a 16-wide tuple + Vector.fromList at each call
+       site) keeps Poly/ML's native codegen from exhausting its registers
+       ("asGenReg"/"asFPReg raised while compiling") on older x86-64 builds. *)
+    fun build (f : int -> real) : t = Vector.tabulate (16, f)
+
     fun perspective {fovy, aspect, near, far} =
       let
-        val f = 1.0 / Math.tan (fovy / 2.0)
+        val ft = 1.0 / Math.tan (fovy / 2.0)
         val nf = 1.0 / (near - far)
+        val a = Array.array (16, 0.0)
+        val () = Array.update (a, 0, ft / aspect)
+        val () = Array.update (a, 5, ft)
+        val () = Array.update (a, 10, (far + near) * nf)
+        val () = Array.update (a, 11, ~1.0)
+        val () = Array.update (a, 14, 2.0 * far * near * nf)
       in
-        fromRows
-          (( f/aspect, 0.0, 0.0,              0.0),
-           ( 0.0,      f,   0.0,              0.0),
-           ( 0.0,      0.0, (far+near)*nf,    2.0*far*near*nf),
-           ( 0.0,      0.0, ~1.0,             0.0))
+        build (fn k => Array.sub (a, k))
       end
 
     fun ortho {left, right, bottom, top, near, far} =
@@ -388,12 +397,16 @@ struct
         val rl = 1.0 / (right - left)
         val tb = 1.0 / (top - bottom)
         val fn_ = 1.0 / (far - near)
+        val a = Array.array (16, 0.0)
+        val () = Array.update (a, 0, 2.0 * rl)
+        val () = Array.update (a, 5, 2.0 * tb)
+        val () = Array.update (a, 10, ~2.0 * fn_)
+        val () = Array.update (a, 12, ~(right + left) * rl)
+        val () = Array.update (a, 13, ~(top + bottom) * tb)
+        val () = Array.update (a, 14, ~(far + near) * fn_)
+        val () = Array.update (a, 15, 1.0)
       in
-        fromRows
-          (( 2.0*rl, 0.0,    0.0,      ~(right+left)*rl),
-           ( 0.0,    2.0*tb, 0.0,      ~(top+bottom)*tb),
-           ( 0.0,    0.0,    ~2.0*fn_, ~(far+near)*fn_),
-           ( 0.0,    0.0,    0.0,      1.0))
+        build (fn k => Array.sub (a, k))
       end
 
     fun lookAt {eye, center, up} =
@@ -493,31 +506,36 @@ struct
         (s1, s2)
       end
 
-    fun slerp (q1 as (w1,x1,y1,z1), q2, t) =
+    (* The blend is its own top-level function (not inlined into slerp) and
+       writes through a mutable array, so neither slerp nor the blend holds the
+       full set of quaternion component reals live at once. This avoids
+       Poly/ML's native-codegen register exhaustion
+       ("asGenReg"/"asFPReg raised while compiling") on older x86-64 builds. *)
+    fun blend (c1, c2, (w1,x1,y1,z1), (w2,x2,y2,z2)) : t =
       let
-        val d0 = dot (q1, q2)
-        (* take shorter arc *)
-        val (q2 as (w2,x2,y2,z2), d) =
-          if d0 < 0.0 then (scale (~1.0, q2), ~d0) else (q2, d0)
-        (* Compute the two blend coefficients, then build the result a
-           component at a time through a mutable array. Keeping the four
-           result reals from being simultaneously live as inlined tuple
-           arithmetic is what avoids Poly/ML's native-codegen FP-register
-           exhaustion ("asFPReg raised while compiling"). *)
-        val (c1, c2) =
-          if d > 0.9995 then (1.0 - t, t)  (* nearly parallel: linear *)
-          else slerpCoeffs (d, t)
         val r = Array.array (4, 0.0)
         val () = Array.update (r, 0, c1*w1 + c2*w2)
         val () = Array.update (r, 1, c1*x1 + c2*x2)
         val () = Array.update (r, 2, c1*y1 + c2*y2)
         val () = Array.update (r, 3, c1*z1 + c2*z2)
-        val res = (Array.sub (r,0), Array.sub (r,1),
-                   Array.sub (r,2), Array.sub (r,3))
+      in
+        (Array.sub (r,0), Array.sub (r,1), Array.sub (r,2), Array.sub (r,3))
+      end
+
+    fun slerp (q1, q2, t) =
+      let
+        val d0 = dot (q1, q2)
+        (* take shorter arc *)
+        val (q2, d) = if d0 < 0.0 then (scale (~1.0, q2), ~d0) else (q2, d0)
+        val near = d > 0.9995
+        val (c1, c2) =
+          if near then (1.0 - t, t)  (* nearly parallel: linear *)
+          else slerpCoeffs (d, t)
+        val res = blend (c1, c2, q1, q2)
       in
         (* The linear branch must be renormalised; the slerp branch is already
            unit-length up to rounding but normalising is harmless. *)
-        if d > 0.9995 then normalize res else res
+        if near then normalize res else res
       end
 
     fun toMat4 q =
