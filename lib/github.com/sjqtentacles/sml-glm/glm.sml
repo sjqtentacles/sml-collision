@@ -121,6 +121,54 @@ struct
   fun matToString (label, els) =
     label ^ "[" ^ String.concatWith ", " (List.map rstr els) ^ "]"
 
+  structure Mat2 =
+  struct
+    (* Column-major: (m00,m10, m01,m11) where mRC is row R, column C. *)
+    type t = real * real * real * real
+
+    val id = (1.0,0.0, 0.0,1.0)
+
+    fun fromCols ((a,b),(c,d)) : t = (a,b, c,d)
+    fun fromRows ((a,b),(c,d)) : t = (a,c, b,d)   (* rows -> column-major *)
+    fun fromList [a,b,c,d] = (a,b,c,d)
+      | fromList _ = raise Fail "Mat2.fromList: need 4 elements"
+    fun toList (a,b,c,d) = [a,b,c,d]
+
+    fun add ((a,b,c,d),(a',b',c',d')) : t = (a+a',b+b',c+c',d+d')
+    fun sub ((a,b,c,d),(a',b',c',d')) : t = (a-a',b-b',c-c',d-d')
+    fun scale (s,(a,b,c,d)) : t = (s*a,s*b,s*c,s*d)
+
+    (* result row i, col j = sum_k A[i,k] B[k,j]; stored column-major. *)
+    fun mul ((a00,a10, a01,a11) : t, (b00,b10, b01,b11) : t) : t =
+      (a00*b00 + a01*b10,   (* r00 *)
+       a10*b00 + a11*b10,   (* r10 *)
+       a00*b01 + a01*b11,   (* r01 *)
+       a10*b01 + a11*b11)   (* r11 *)
+
+    fun transpose ((m00,m10, m01,m11) : t) : t = (m00,m01, m10,m11)
+
+    fun det ((m00,m10, m01,m11) : t) : real = m00*m11 - m01*m10
+
+    fun inverse (m as (m00,m10, m01,m11) : t) : t option =
+      let
+        val d = det m
+      in
+        if Real.== (d, 0.0) then NONE
+        else
+          let val inv = 1.0 / d
+          in SOME (m11*inv, ~m10*inv, ~m01*inv, m00*inv) end
+      end
+
+    fun mulV ((m00,m10, m01,m11) : t, (x,y)) : Vec2.t =
+      (m00*x + m01*y, m10*x + m11*y)
+
+    fun equal (a, b) =
+      ListPair.allEq (fn (p,q) => Real.== (p,q)) (toList a, toList b)
+    fun approx eps (a, b) =
+      ListPair.all (fn (p,q) => Real.abs (p-q) <= eps) (toList a, toList b)
+    fun toString m = matToString ("Mat2", toList m)
+  end
+
   structure Mat3 =
   struct
     (* Column-major: (m00,m10,m20, m01,m11,m21, m02,m12,m22) where mRC is
@@ -409,6 +457,23 @@ struct
         build (fn k => Array.sub (a, k))
       end
 
+    fun frustum {left, right, bottom, top, near, far} =
+      let
+        val rl = 1.0 / (right - left)
+        val tb = 1.0 / (top - bottom)
+        val fn_ = 1.0 / (far - near)
+        val a = Array.array (16, 0.0)
+        val () = Array.update (a, 0, 2.0 * near * rl)
+        val () = Array.update (a, 5, 2.0 * near * tb)
+        val () = Array.update (a, 8, (right + left) * rl)
+        val () = Array.update (a, 9, (top + bottom) * tb)
+        val () = Array.update (a, 10, ~(far + near) * fn_)
+        val () = Array.update (a, 11, ~1.0)
+        val () = Array.update (a, 14, ~2.0 * far * near * fn_)
+      in
+        build (fn k => Array.sub (a, k))
+      end
+
     fun lookAt {eye, center, up} =
       let
         val f = Vec3.normalize (Vec3.sub (center, eye))   (* forward *)
@@ -607,4 +672,47 @@ struct
     fun toString (a,b,c,d) =
       "Quat(" ^ rstr a ^ ", " ^ rstr b ^ ", " ^ rstr c ^ ", " ^ rstr d ^ ")"
   end
+
+  (* gluProject: obj -> clip via proj*model, perspective divide to NDC, then
+     the viewport map. Window z (depth) lands in [0, 1]. *)
+  fun project {obj, model, proj, viewport} =
+    let
+      val {x = vx, y = vy, width, height} = viewport
+      val (ox, oy, oz) = obj
+      val (cx, cy, cz, cw) =
+        Mat4.mulV (Mat4.mul (proj, model), (ox, oy, oz, 1.0))
+    in
+      if Real.== (cw, 0.0) then Vec3.zero
+      else
+        let
+          val nx = cx / cw
+          val ny = cy / cw
+          val nz = cz / cw
+        in
+          (vx + width  * (nx + 1.0) / 2.0,
+           vy + height * (ny + 1.0) / 2.0,
+           (nz + 1.0) / 2.0)
+        end
+    end
+
+  (* gluUnProject: invert the viewport map to NDC, then apply the inverse of
+     proj*model and the perspective divide. *)
+  fun unproject {win, model, proj, viewport} =
+    let
+      val {x = vx, y = vy, width, height} = viewport
+      val (wx, wy, wz) = win
+    in
+      case Mat4.inverse (Mat4.mul (proj, model)) of
+        NONE => Vec3.zero
+      | SOME inv =>
+          let
+            val nx = 2.0 * (wx - vx) / width - 1.0
+            val ny = 2.0 * (wy - vy) / height - 1.0
+            val nz = 2.0 * wz - 1.0
+            val (rx, ry, rz, rw) = Mat4.mulV (inv, (nx, ny, nz, 1.0))
+          in
+            if Real.== (rw, 0.0) then Vec3.zero
+            else (rx / rw, ry / rw, rz / rw)
+          end
+    end
 end

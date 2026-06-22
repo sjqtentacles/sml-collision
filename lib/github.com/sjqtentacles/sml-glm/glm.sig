@@ -106,6 +106,31 @@ sig
     val toString : t -> string
   end
 
+  structure Mat2 :
+  sig
+    type t
+    val id : t
+    (* Build from rows (the natural reading order); stored column-major. *)
+    val fromRows : Vec2.t * Vec2.t -> t
+    val fromCols : Vec2.t * Vec2.t -> t
+    (* Column-major 4-element list. *)
+    val fromList : real list -> t
+    val toList   : t -> real list
+
+    val add : t * t -> t
+    val sub : t * t -> t
+    val mul : t * t -> t
+    val scale : real * t -> t
+    val transpose : t -> t
+    val det : t -> real
+    val inverse : t -> t option
+    val mulV : t * Vec2.t -> Vec2.t
+
+    val equal  : t * t -> bool
+    val approx : real -> t * t -> bool
+    val toString : t -> string
+  end
+
   structure Mat3 :
   sig
     type t
@@ -164,6 +189,10 @@ sig
     val perspective : { fovy : real, aspect : real, near : real, far : real } -> t
     val ortho : { left : real, right : real, bottom : real, top : real,
                   near : real, far : real } -> t
+    (* General perspective frustum (`glFrustum`): right-handed, GL clip-space
+       z in [-1, 1]. `perspective` is the symmetric special case. *)
+    val frustum : { left : real, right : real, bottom : real, top : real,
+                    near : real, far : real } -> t
     val lookAt : { eye : Vec3.t, center : Vec3.t, up : Vec3.t } -> t
 
     val equal  : t * t -> bool
@@ -200,4 +229,20 @@ sig
     val approx : real -> t * t -> bool
     val toString : t -> string
   end
+
+  (* Map an object-space point to window coordinates given the model(view) and
+     projection matrices and a viewport (`gluProject`): window x/y are in
+     pixels, window z (depth) is in [0, 1]. *)
+  val project :
+    { obj : Vec3.t, model : Mat4.t, proj : Mat4.t,
+      viewport : { x : real, y : real, width : real, height : real } }
+    -> Vec3.t
+
+  (* Inverse of `project` (`gluUnProject`): map a window coordinate (with z in
+     [0, 1]) back to object space. Returns `Vec3.zero` if `proj * model` is
+     singular or the result is at infinity, so it is total. *)
+  val unproject :
+    { win : Vec3.t, model : Mat4.t, proj : Mat4.t,
+      viewport : { x : real, y : real, width : real, height : real } }
+    -> Vec3.t
 end
