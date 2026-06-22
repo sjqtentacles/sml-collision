@@ -4,10 +4,20 @@ struct
   open Collision
   structure V = Collision.Glm.Vec2
 
+  (* Forced-decimal formatter: deterministic across MLton and Poly/ML
+     (always a decimal point, leading "-" not "~", fixed 6 dp). *)
+  fun fmtReal r =
+    let val s = if Real.signBit r then "-" else ""
+        val a = Real.abs r
+        val scaled = Real.realRound (a * 1000000.0)
+        val whole = Real.floor (scaled / 1000000.0)
+        val frac  = Real.floor scaled - whole * 1000000
+    in s ^ Int.toString whole ^ "." ^ StringCvt.padLeft #"0" 6 (Int.toString frac) end
+
   (* local real-approx helper *)
   val eps = 1.0E~6
   fun checkReal name (expected, actual) =
-    Harness.check (name ^ " (" ^ Real.toString expected ^ " ~ " ^ Real.toString actual ^ ")")
+    Harness.check (name ^ " (" ^ fmtReal expected ^ " ~ " ^ fmtReal actual ^ ")")
                   (Real.abs (expected - actual) < eps)
 
   fun v (x, y) = V.v (x, y)
